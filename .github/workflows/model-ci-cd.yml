@@ -1,0 +1,147 @@
+name: Model CI/CD
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: [main]
+  repository_dispatch:
+    types: [model-drift-detected]
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-ci.txt
+      - run: pip install -r requirements-ci.txt
+      - run: pytest -q
+
+  model-validation:
+    needs: tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-ci.txt
+      - run: pip install -r requirements-ci.txt
+      - name: Train candidate and enforce baseline ROC-AUC
+        run: >-
+          python mlops/model_gate.py
+          --data data/fraud_dataset.csv
+          --baseline models/baseline_auc.json
+          --model-output models/fraud_model_pipeline.joblib
+          --metrics-output models/model_metrics.json
+          --reference-output models/reference_stats.json
+      - name: Export optimized ONNX classifier
+        run: python mlops/export_onnx.py --model models/fraud_model_pipeline.joblib
+      - uses: actions/upload-artifact@v4
+        with:
+          name: validated-model
+          path: |
+            models/fraud_model_pipeline.joblib
+            models/reference_stats.json
+            models/model_metrics.json
+            models/fraud_classifier.onnx
+          if-no-files-found: error
+
+  deploy-ecs:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [tests, model-validation]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: validated-model
+          path: models
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - uses: aws-actions/amazon-ecr-login@v2
+        id: ecr
+      - name: Build and push gated image
+        env:
+          ECR_REGISTRY: ${{ steps.ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build --tag "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" .
+          docker push "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+      - name: Update ECS task definition and service
+        env:
+          IMAGE_URI: ${{ steps.ecr.outputs.registry }}/${{ vars.ECR_REPOSITORY }}:${{ github.sha }}
+          TASK_FAMILY: ${{ vars.ECS_TASK_FAMILY }}
+          CONTAINER_NAME: ${{ vars.ECS_CONTAINER_NAME }}
+          ECS_CLUSTER: ${{ vars.ECS_CLUSTER }}
+          ECS_SERVICE: ${{ vars.ECS_SERVICE }}
+        run: |
+          aws ecs describe-task-definition --task-definition "$TASK_FAMILY" \
+            --query taskDefinition > task-definition.json
+          jq --arg IMAGE "$IMAGE_URI" --arg NAME "$CONTAINER_NAME" \
+            '.containerDefinitions |= map(if .name == $NAME then
+               .image = $IMAGE
+               | .environment = ((.environment // []) | map(select(.name != "MODEL_VERSION" and .name != "ONNX_MODEL_PATH")))
+                 + [{"name":"MODEL_VERSION","value":env.GITHUB_SHA},{"name":"ONNX_MODEL_PATH","value":"/app/models/fraud_classifier.onnx"}]
+             else . end)
+             | del(.taskDefinitionArn,.revision,.status,.requiresAttributes,.compatibilities,.registeredAt,.registeredBy)' \
+            task-definition.json > new-task-definition.json
+          REVISION=$(aws ecs register-task-definition \
+            --cli-input-json file://new-task-definition.json \
+            --query 'taskDefinition.taskDefinitionArn' --output text)
+          aws ecs update-service --cluster "$ECS_CLUSTER" --service "$ECS_SERVICE" \
+            --task-definition "$REVISION" --force-new-deployment
+          aws ecs wait services-stable --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE"
+
+  deploy-sagemaker:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.DEPLOY_SAGEMAKER == 'true'
+    needs: [tests, model-validation]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: validated-model
+          path: models
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - uses: aws-actions/amazon-ecr-login@v2
+        id: ecr
+      - name: Build and push SageMaker inference image
+        env:
+          ECR_REGISTRY: ${{ steps.ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build --tag "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" .
+          docker push "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+      - name: Deploy gated model to SageMaker
+        env:
+          IMAGE_URI: ${{ steps.ecr.outputs.registry }}/${{ vars.ECR_REPOSITORY }}:${{ github.sha }}
+          SAGEMAKER_ROLE_ARN: ${{ secrets.SAGEMAKER_EXECUTION_ROLE_ARN }}
+          MODEL_BUCKET: ${{ vars.SAGEMAKER_MODEL_BUCKET }}
+          ENDPOINT_NAME: ${{ vars.SAGEMAKER_ENDPOINT_NAME }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          MODEL_VERSION: ${{ github.sha }}
+        run: |
+          pip install boto3
+          python mlops/deploy_sagemaker.py \
+            --image-uri "$IMAGE_URI" \
+            --role-arn "$SAGEMAKER_ROLE_ARN" \
+            --bucket "$MODEL_BUCKET" \
+            --endpoint-name "$ENDPOINT_NAME" \
+            --version "$MODEL_VERSION"

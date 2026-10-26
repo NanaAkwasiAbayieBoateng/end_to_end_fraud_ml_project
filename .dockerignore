@@ -1,0 +1,16 @@
+.git
+.github
+.venv
+venv
+__pycache__
+*.py[cod]
+data
+mlruns
+mlflow.db
+models/*
+!models/__init__.py
+!models/train.py
+!models/fraud_model_pipeline.joblib
+!models/reference_stats.json
+!models/fraud_classifier.onnx
+tests

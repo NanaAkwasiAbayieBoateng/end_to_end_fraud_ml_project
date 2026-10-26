@@ -1,0 +1,88 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Daily ECS scheduled PSI check for the fraud prediction service.
+Parameters:
+  ClusterArn:
+    Type: String
+  TaskDefinitionArn:
+    Type: String
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+  SecurityGroupIds:
+    Type: List<AWS::EC2::SecurityGroup::Id>
+  PredictionLogGroup:
+    Type: String
+  DriftSnsTopicArn:
+    Type: String
+  TaskExecutionRoleArn:
+    Type: String
+  TaskRoleArn:
+    Type: String
+  TaskRoleName:
+    Type: String
+  ContainerName:
+    Type: String
+    Default: fraud-api
+Resources:
+  DriftTaskPermissions:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: FraudDriftCheckPermissions
+      Roles:
+        - !Ref TaskRoleName
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action: logs:FilterLogEvents
+            Resource: !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:${PredictionLogGroup}:*"
+          - Effect: Allow
+            Action: sns:Publish
+            Resource: !Ref DriftSnsTopicArn
+  DriftScheduleRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: scheduler.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: RunDriftCheckTask
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: ecs:RunTask
+                Resource: !Ref TaskDefinitionArn
+                Condition:
+                  ArnEquals:
+                    ecs:cluster: !Ref ClusterArn
+              - Effect: Allow
+                Action: iam:PassRole
+                Resource:
+                  - !Ref TaskExecutionRoleArn
+                  - !Ref TaskRoleArn
+  DriftCheckSchedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      FlexibleTimeWindow:
+        Mode: "OFF"
+      ScheduleExpression: "rate(1 day)"
+      Target:
+        Arn: !Ref ClusterArn
+        RoleArn: !GetAtt DriftScheduleRole.Arn
+        EcsParameters:
+          TaskDefinitionArn: !Ref TaskDefinitionArn
+          LaunchType: FARGATE
+          NetworkConfiguration:
+            AwsvpcConfiguration:
+              AssignPublicIp: DISABLED
+              Subnets: !Ref SubnetIds
+              SecurityGroups: !Ref SecurityGroupIds
+        Input: !Sub
+          - '{"containerOverrides":[{"name":"${Container}","command":["python","mlops/drift_check.py","--reference","models/reference_stats.json","--cloudwatch-log-group","${LogGroup}","--hours","24","--sns-topic-arn","${Topic}"]}]}'
+          - LogGroup: !Ref PredictionLogGroup
+            Topic: !Ref DriftSnsTopicArn
+            Container: !Ref ContainerName
