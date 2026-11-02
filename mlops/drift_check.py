@@ -1,9 +1,10 @@
 import argparse
 import json
 import os
-import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable
+from urllib.request import Request, urlopen
 
 import numpy as np
 import pandas as pd
@@ -41,67 +42,78 @@ def psi_from_reference(
     return float(np.sum((actual_pct - expected_pct) * np.log(actual_pct / expected_pct)))
 
 
-def records_from_cloudwatch(log_group: str, hours: float) -> Iterable[dict]:
-    import boto3
+def records_from_file(log_path: Path, hours: float) -> Iterable[dict]:
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+    paths = [log_path, *sorted(log_path.parent.glob(f"{log_path.name}.*"))]
+    for path in paths:
+        if not path.is_file():
+            continue
+        with path.open(encoding="utf-8") as stream:
+            for line in stream:
+                try:
+                    item = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(item, dict):
+                    continue
+                raw_timestamp = item.get("timestamp")
+                if item.get("event") != "fraud_prediction" or not isinstance(
+                    raw_timestamp, str
+                ):
+                    continue
+                try:
+                    timestamp = datetime.fromisoformat(raw_timestamp.replace("Z", "+00:00"))
+                except ValueError:
+                    continue
+                if timestamp.tzinfo is None:
+                    timestamp = timestamp.replace(tzinfo=timezone.utc)
+                if timestamp >= cutoff:
+                    yield item
 
-    client = boto3.client("logs")
-    start_ms = int((time.time() - hours * 3600) * 1000)
-    token = None
-    while True:
-        params = {
-            "logGroupName": log_group,
-            "startTime": start_ms,
-            "filterPattern": '{ $.event = "fraud_prediction" }',
-        }
-        if token:
-            params["nextToken"] = token
-        result = client.filter_log_events(**params)
-        for event in result.get("events", []):
-            try:
-                yield json.loads(event["message"])
-            except json.JSONDecodeError:
-                continue
-        next_token = result.get("nextToken")
-        if not next_token or next_token == token:
-            return
-        token = next_token
 
-
-def records_from_file(log_path: Path) -> Iterable[dict]:
-    with log_path.open(encoding="utf-8") as stream:
-        for line in stream:
-            try:
-                item = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if item.get("event") == "fraud_prediction":
-                yield item
+def post_json(url: str, payload: dict, token: str | None = None) -> None:
+    headers = {"Content-Type": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+        headers["Accept"] = "application/vnd.github+json"
+        headers["X-GitHub-Api-Version"] = "2022-11-28"
+    request = Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers=headers,
+        method="POST",
+    )
+    with urlopen(request, timeout=15) as response:
+        if response.status not in (200, 201, 202, 204):
+            raise RuntimeError(f"Notification request failed: HTTP {response.status}")
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Compute PSI on recent prediction features.")
     parser.add_argument("--reference", type=Path, default=Path("models/reference_stats.json"))
-    parser.add_argument("--prediction-log", type=Path)
-    parser.add_argument("--cloudwatch-log-group")
+    parser.add_argument(
+        "--prediction-log",
+        type=Path,
+        default=Path(os.getenv("PREDICTION_LOG_PATH", "logs/predictions.jsonl")),
+    )
     parser.add_argument("--hours", type=float, default=24)
     parser.add_argument("--threshold", type=float, default=0.2)
-    parser.add_argument("--sns-topic-arn", default=os.getenv("DRIFT_SNS_TOPIC_ARN"))
     parser.add_argument("--github-repository", default=os.getenv("GITHUB_REPOSITORY"))
     parser.add_argument("--github-token", default=os.getenv("DRIFT_DISPATCH_TOKEN"))
+    parser.add_argument("--alert-webhook-url", default=os.getenv("DRIFT_ALERT_WEBHOOK_URL"))
     parser.add_argument("--min-predictions", type=int, default=100)
     args = parser.parse_args()
     if not args.reference.is_file():
         parser.error(f"Reference summary not found: {args.reference}")
-    if bool(args.prediction_log) == bool(args.cloudwatch_log_group):
-        parser.error("Specify exactly one of --prediction-log or --cloudwatch-log-group.")
     if bool(args.github_repository) != bool(args.github_token):
         parser.error("--github-repository and --github-token must be configured together.")
 
-    if args.prediction_log:
-        records = records_from_file(args.prediction_log)
-    else:
-        records = records_from_cloudwatch(args.cloudwatch_log_group, args.hours)
-    samples = list(records)
+    if args.hours <= 0 or args.threshold <= 0 or args.min_predictions < 1:
+        parser.error("--hours, --threshold, and --min-predictions must be positive.")
+    if not args.prediction_log.is_file():
+        print(f"Drift check skipped: prediction log not found: {args.prediction_log}")
+        return 0
+    samples = list(records_from_file(args.prediction_log, args.hours))
     if len(samples) < args.min_predictions:
         print(f"Drift check skipped: only {len(samples)} recent predictions.")
         return 0
@@ -153,13 +165,10 @@ def main() -> int:
         return 0
 
     message = f"Fraud model drift detected (PSI >= {args.threshold}): {drifted}"
-    if args.sns_topic_arn:
-        import boto3
-
-        boto3.client("sns").publish(
-            TopicArn=args.sns_topic_arn,
-            Subject="Fraud model input drift detected",
-            Message=message,
+    if args.alert_webhook_url:
+        post_json(
+            args.alert_webhook_url,
+            {"text": message, "message": message, "report": report},
         )
     if args.github_repository and args.github_token:
         import urllib.request
@@ -178,6 +187,7 @@ def main() -> int:
         with urllib.request.urlopen(request, timeout=15) as response:
             if response.status not in (200, 204):
                 raise RuntimeError(f"GitHub retraining dispatch failed: HTTP {response.status}")
+        print("Retraining candidate dispatched; the AUC promotion gate still applies.")
     return 0
 
 

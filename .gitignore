@@ -23,6 +23,7 @@ models/*
 !tests/
 !tests/**
 !Dockerfile
+!compose.yaml
 !.dockerignore
 __pycache__/
 *.py[cod]

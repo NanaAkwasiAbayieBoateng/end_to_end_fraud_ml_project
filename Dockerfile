@@ -19,7 +19,9 @@ WORKDIR /app
 RUN apt-get update \
     && apt-get install --no-install-recommends -y libgomp1 \
     && rm -rf /var/lib/apt/lists/* \
-    && useradd --create-home --uid 10001 appuser
+    && useradd --create-home --uid 10001 appuser \
+    && mkdir -p /app/logs \
+    && chown appuser:appuser /app/logs
 COPY --from=builder /opt/venv /opt/venv
 COPY app ./app
 COPY models/ ./models/

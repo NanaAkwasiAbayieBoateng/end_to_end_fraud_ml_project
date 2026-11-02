@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Fraud Prediction</title>
+  <style>
+    :root { color-scheme: light; font-family: system-ui, sans-serif; }
+    body { background: #f3f6fa; color: #172033; margin: 0; padding: 2rem 1rem; }
+    main { background: white; border-radius: 12px; box-shadow: 0 8px 30px #17203314; margin: auto; max-width: 760px; padding: 2rem; }
+    h1 { margin-top: 0; }
+    p { color: #58647a; }
+    form { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+    label { display: grid; gap: .4rem; font-size: .9rem; font-weight: 600; }
+    input { border: 1px solid #cbd3df; border-radius: 6px; font: inherit; padding: .65rem; }
+    button { background: #165dca; border: 0; border-radius: 6px; color: white; cursor: pointer; font: inherit; font-weight: 700; grid-column: 1 / -1; padding: .8rem; }
+    button:disabled { cursor: wait; opacity: .65; }
+    #result { border-radius: 8px; margin-top: 1.25rem; padding: 1rem; }
+    #result[hidden] { display: none; }
+    #result[data-fraud="true"] { background: #fff0ef; color: #a32119; }
+    #result[data-fraud="false"] { background: #eaf8ef; color: #176b36; }
+    #result[data-error="true"] { background: #fff6df; color: #71520a; }
+    @media (max-width: 520px) { main { padding: 1.25rem; } }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Fraud prediction</h1>
+    <p>Enter transaction details to get a prediction from the current model. All fields are optional.</p>
+    <form id="prediction-form">
+      <label>Items purchased
+        <input name="items_purchased" type="number" step="any">
+      </label>
+      <label>Transaction amount
+        <input name="transaction_amount" type="number" step="any">
+      </label>
+      <label>Average 7-day spend
+        <input name="avg_7day_spend" type="number" step="any">
+      </label>
+      <label>Account age (months)
+        <input name="account_age_months" type="number" step="any">
+      </label>
+      <label>MCC code
+        <input name="mcc_code" type="text">
+      </label>
+      <label>Product category
+        <input name="product_category" type="text">
+      </label>
+      <label>Last login time
+        <input name="last_login_time" type="datetime-local">
+      </label>
+      <label>Transaction date and time
+        <input name="transaction_datetime" type="datetime-local">
+      </label>
+      <button type="submit">Get prediction</button>
+    </form>
+    <section id="result" aria-live="polite" hidden></section>
+  </main>
+  <script>
+    const form = document.querySelector("#prediction-form");
+    const result = document.querySelector("#result");
+    const numericFields = new Set([
+      "items_purchased", "transaction_amount", "avg_7day_spend", "account_age_months"
+    ]);
+
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const button = form.querySelector("button");
+      button.disabled = true;
+      result.hidden = true;
+
+      const payload = Object.fromEntries(new FormData(form).entries());
+      for (const [name, value] of Object.entries(payload)) {
+        payload[name] = value === "" ? null : numericFields.has(name) ? Number(value) : value;
+      }
+
+      try {
+        const response = await fetch("/predict", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+        const data = await response.json();
+        if (!response.ok) {
+          throw new Error(data.detail?.map?.((item) => item.msg).join(", ") || data.detail || "Prediction failed.");
+        }
+        result.dataset.fraud = String(data.predicted_fraud);
+        result.dataset.error = "false";
+        result.textContent = `${data.predicted_fraud ? "Fraud predicted" : "No fraud predicted"} — probability ${(data.fraud_probability * 100).toFixed(2)}%.`;
+      } catch (error) {
+        result.dataset.error = "true";
+        result.textContent = `Unable to get prediction: ${error.message}`;
+      } finally {
+        result.hidden = false;
+        button.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>

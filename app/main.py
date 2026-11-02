@@ -1,8 +1,10 @@
 import json
+import logging
 import os
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timezone
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Annotated, Optional
 from uuid import uuid4
@@ -11,6 +13,7 @@ import joblib
 import numpy as np
 import pandas as pd
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -49,7 +52,12 @@ class PredictionResponse(BaseModel):
 
 
 def create_app(model=None, model_version: Optional[str] = None) -> FastAPI:
-    state = {"model": model, "model_version": model_version, "onnx": None}
+    state = {
+        "model": model,
+        "model_version": model_version,
+        "onnx": None,
+        "prediction_logger": None,
+    }
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -68,9 +76,31 @@ def create_app(model=None, model_version: Optional[str] = None) -> FastAPI:
                 state["onnx"] = onnxruntime.InferenceSession(
                     onnx_path, providers=["CPUExecutionProvider"]
                 )
-        yield
+        log_path = os.getenv("PREDICTION_LOG_PATH")
+        if log_path:
+            path = Path(log_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            prediction_logger = logging.Logger(f"fraud_predictions_{id(state)}")
+            prediction_logger.setLevel(logging.INFO)
+            prediction_logger.addHandler(
+                RotatingFileHandler(path, maxBytes=10_000_000, backupCount=5, encoding="utf-8")
+            )
+            prediction_logger.propagate = False
+            state["prediction_logger"] = prediction_logger
+        try:
+            yield
+        finally:
+            prediction_logger = state["prediction_logger"]
+            if prediction_logger is not None:
+                for handler in prediction_logger.handlers:
+                    handler.close()
+                    prediction_logger.removeHandler(handler)
 
     api = FastAPI(title="Fraud Prediction API", version="1.0.0", lifespan=lifespan)
+
+    @api.get("/", include_in_schema=False)
+    def prediction_form():
+        return FileResponse(Path(__file__).with_name("index.html"))
 
     @api.get("/health")
     @api.get("/ping")
@@ -111,22 +141,20 @@ def create_app(model=None, model_version: Optional[str] = None) -> FastAPI:
         latency_ms = (time.perf_counter() - started_at) * 1000
         version = state["model_version"] or "unknown"
 
-        print(
-            json.dumps(
-                {
-                    "event": "fraud_prediction",
-                    "request_id": request_id,
-                    "model_version": version,
-                    "fraud_probability": probability,
-                    "predicted_fraud": probability >= 0.5,
-                    "latency_ms": round(latency_ms, 3),
-                    "features": features,
-                },
-                default=str,
-                separators=(",", ":"),
-            ),
-            flush=True,
-        )
+        record = {
+            "event": "fraud_prediction",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "request_id": request_id,
+            "model_version": version,
+            "fraud_probability": probability,
+            "predicted_fraud": probability >= 0.5,
+            "latency_ms": round(latency_ms, 3),
+            "features": features,
+        }
+        serialized_record = json.dumps(record, default=str, separators=(",", ":"))
+        print(serialized_record, flush=True)
+        if state["prediction_logger"] is not None:
+            state["prediction_logger"].info(serialized_record)
         return PredictionResponse(
             request_id=request_id,
             fraud_probability=probability,

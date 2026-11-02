@@ -1,0 +1,38 @@
+services:
+  fraud-api:
+    image: fraud-api:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      MODEL_PATH: /app/models/fraud_model_pipeline.joblib
+      MODEL_VERSION: ${MODEL_VERSION:-local}
+      PREDICTION_LOG_PATH: /app/logs/predictions.jsonl
+    ports:
+      - "${API_BIND_ADDRESS:-127.0.0.1}:${API_PORT:-8000}:8000"
+    volumes:
+      - prediction-logs:/app/logs
+    restart: unless-stopped
+
+  drift-check:
+    image: fraud-api:latest
+    entrypoint: ["python", "mlops/drift_check.py"]
+    command:
+      - --reference
+      - models/reference_stats.json
+      - --prediction-log
+      - /app/logs/predictions.jsonl
+      - --hours
+      - "24"
+      - --threshold
+      - "0.2"
+    environment:
+      PREDICTION_LOG_PATH: /app/logs/predictions.jsonl
+      GITHUB_REPOSITORY: ${GITHUB_REPOSITORY:-}
+      DRIFT_DISPATCH_TOKEN: ${DRIFT_DISPATCH_TOKEN:-}
+      DRIFT_ALERT_WEBHOOK_URL: ${DRIFT_ALERT_WEBHOOK_URL:-}
+    volumes:
+      - prediction-logs:/app/logs:ro
+
+volumes:
+  prediction-logs:
