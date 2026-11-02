@@ -18,6 +18,7 @@ models/*
 !README.md
 !requirements-ci.txt
 !requirements-serving.txt
+!BLOG_POST.md
 !mlops/
 !mlops/**
 !tests/
