@@ -12,7 +12,7 @@ system. Its checked-in CSV is a small example dataset with 10,000 rows and a
 3% positive class; it is not a substitute for representative, properly
 labelled transaction data. Its checked-in ROC-AUC threshold of `0.70` is a
 starter gate, not evidence that the model is safe or effective for a real
-business.
+business. The project can be cloned from github as `git clone https://github.com/NanaAkwasiAbayieBoateng/end_to_end_fraud_ml_project.git`
 
 ## Project structure
 
