@@ -105,22 +105,41 @@ popularity alone.
 
 ## 1. Prepare the environment
 
-The project targets Python 3.12. To run it locally from PowerShell, create and
-activate a virtual environment, then install the project and test
-dependencies:
+The project targets Python 3.12. This walkthrough runs the Python commands in
+Ubuntu on WSL, not in PowerShell. Start WSL first, then change to the project
+directory from the Linux shell. Do not activate a PowerShell virtual
+environment: Windows and Linux virtual environments use different
+interpreters and are not interchangeable.
+
+From PowerShell, enter Ubuntu:
 
 ```powershell
-py -3.12 -m venv .venv
-.\.venv\Scripts\Activate.ps1
+wsl -d Ubuntu
+```
+
+Then, in the Ubuntu shell, change to the project directory on the Windows
+drive, create and activate a Linux virtual environment named
+`end_to_end_fraud_ml_project`, and install the project and test dependencies:
+
+```bash
+cd "/mnt/c/Users/nboateng/OneDrive - NiCE Ltd/Documents/Research/end_to_end_fraud_ml_project"
+mkdir -p ~/.venvs
+python3.12 -m venv ~/.venvs/end_to_end_fraud_ml_project
+source ~/.venvs/end_to_end_fraud_ml_project/bin/activate
+which python
+which pip
 python -m pip install -r requirements-ci.txt
 ```
 
-If PowerShell prevents activation, use the virtual environment's interpreter
-directly instead:
-
-```powershell
-.\.venv\Scripts\python.exe -m pip install -r requirements-ci.txt
-```
+The `which` commands should point to the Linux environment under
+`~/.venvs/end_to_end_fraud_ml_project`. Run the remaining project commands in
+this same WSL terminal while the environment is activated. If the virtual
+environment already exists, skip the `python3.12 -m venv` command and activate
+it. The repository's `requirements-ci.txt` includes the serving dependencies
+and test tools needed for the complete walkthrough. If you only need the
+application dependencies from `requirements.txt`, use
+`python -m pip install -r requirements.txt` instead of the final install
+command above; that file does not include the test tools.
 
 `requirements-ci.txt` includes the serving dependencies plus test and ONNX
 conversion packages. The container uses the smaller `requirements-serving.txt`
@@ -161,7 +180,7 @@ deployment also needs explicit data validation and leakage review.
 
 Run the end-to-end candidate gate from the repository root:
 
-```powershell
+```bash
 python mlops/model_gate.py
 ```
 
@@ -211,9 +230,14 @@ estimate.
 
 Run the focused automated test suite:
 
-```powershell
-pytest -q tests
+```bash
+python -m pytest -q tests
 ```
+
+Using `python -m pytest` runs pytest from the active Linux virtual environment.
+If it reports `No module named pytest`, confirm that the environment is
+activated and install the test dependencies with
+`python -m pip install -r requirements-ci.txt`, then rerun the command.
 
 The tests cover API validation and responses, prediction logging, batch-score
 columns and input checks, and drift calculations and log-window filtering.
@@ -222,30 +246,29 @@ quality.
 
 Once `model_gate.py` succeeds, start the API directly:
 
-```powershell
-uvicorn app.main:app --host 127.0.0.1 --port 8000
+```bash
+python -m uvicorn app.main:app --reload
 ```
 
 Visit `http://127.0.0.1:8000/` for the interactive form or
 `http://127.0.0.1:8000/docs` for the OpenAPI interface. `/health` (also
 available as `/ping`) is a liveness check; `/ready` reports whether a model has
 loaded. Predictions are available at `POST /predict` and its `/invocations`
-alias. For example, from PowerShell:
+alias. For example, from the WSL shell:
 
-```powershell
-$body = @{
-  items_purchased = 2
-  transaction_amount = 24.5
-  avg_7day_spend = 18
-  account_age_months = 8
-  mcc_code = "Retail_A"
-  product_category = "Clothing"
-  last_login_time = "2023-01-01T10:00:00"
-  transaction_datetime = "2023-01-01T10:30:00"
-} | ConvertTo-Json
-
-Invoke-RestMethod -Uri "http://127.0.0.1:8000/predict" `
-  -Method Post -ContentType "application/json" -Body $body
+```bash
+curl -X POST http://127.0.0.1:8000/predict \
+  -H "Content-Type: application/json" \
+  -d '{
+    "items_purchased": 2,
+    "transaction_amount": 24.5,
+    "avg_7day_spend": 18,
+    "account_age_months": 8,
+    "mcc_code": "Retail_A",
+    "product_category": "Clothing",
+    "last_login_time": "2023-01-01T10:00:00",
+    "transaction_datetime": "2023-01-01T10:30:00"
+  }'
 ```
 
 The response contains a `fraud_probability`, a `predicted_fraud` boolean,
@@ -257,10 +280,10 @@ rule is probability greater than or equal to 0.5. A caller can supply an
 
 Prepare a CSV containing all eight feature columns, then run:
 
-```powershell
-python -m mlops.score_batch `
-  --input data\transactions.csv `
-  --output data\scored_transactions.csv
+```bash
+python -m mlops.score_batch \
+  --input data/transactions.csv \
+  --output data/scored_transactions.csv
 ```
 
 The script loads `models/fraud_model_pipeline.joblib` by default, preserves
@@ -276,7 +299,7 @@ organization's data-handling rules.
 After the gate has produced the model and reference statistics, build and run
 the local container:
 
-```powershell
+```bash
 docker compose --project-name fraud-model up --build -d
 ```
 
@@ -287,7 +310,7 @@ prediction logs in a named Docker volume. Check
 `http://127.0.0.1:8000/ready` and open the form or API docs to confirm it is
 serving. To stop the service without removing its persistent log volume, run:
 
-```powershell
+```bash
 docker compose --project-name fraud-model down
 ```
 
@@ -310,9 +333,9 @@ End-to-end ONNX inference is feasible, but it would require changing the export 
 `mlops/export_onnx.py` exports the XGBoost classifier and checks its predicted
 probabilities against the classifier in the scikit-learn pipeline:
 
-```powershell
-python mlops/export_onnx.py `
-  --model models/fraud_model_pipeline.joblib `
+```bash
+python mlops/export_onnx.py \
+  --model models/fraud_model_pipeline.joblib \
   --output models/fraud_classifier.onnx
 ```
 
@@ -361,7 +384,7 @@ workflow, configure `DRIFT_DISPATCH_TOKEN` with a fine-scoped GitHub token
 allowed to create repository dispatches. The scheduled job also needs the
 self-hosted runner and deployed Compose log volume. To run the check manually:
 
-```powershell
+```bash
 docker compose --project-name fraud-model run --rm --no-deps drift-check
 ```
 
@@ -416,22 +439,20 @@ validated artifacts, and monitor inputs without confusing drift for labelled
 model performance. With those pieces in place, the repository offers a clear
 path from a local example to a controlled, testable model-serving workflow.
 
-## Deploy locally from PowerShell
+## Deploy locally from WSL
 
-From the repository root, first run the model gate, then start the Compose
-service only if validation succeeds:
+In the activated WSL environment, from the repository root, first run the
+model gate, then start the Compose service only if validation succeeds:
 
-```powershell
-python mlops/model_gate.py
-if ($LASTEXITCODE -ne 0) { throw "Model validation failed; deployment stopped." }
+```bash
+python mlops/model_gate.py &&
 docker compose --project-name fraud-model up --build -d
 docker compose --project-name fraud-model ps
 ```
 
 The API binds to `http://127.0.0.1:8000` by default; visit
-`http://127.0.0.1:8000/docs` to inspect the API. Docker Desktop (or another
-Docker Engine) must already be running. If Compose reports that it cannot open
-the `dockerDesktopLinuxEngine` pipe on Windows, the Docker engine is not
-available to the CLI; start Docker Desktop and verify `docker version` before
-retrying the Compose command. The model gate can succeed independently, but
-that does not mean the container has started.
+`http://127.0.0.1:8000/docs` to inspect the API. A Docker Engine and Compose
+plugin must be available to WSL. If using Docker Desktop, enable its WSL
+integration for Ubuntu and verify `docker version` from the WSL shell. The
+model gate can succeed independently, but that does not mean the container has
+started.
