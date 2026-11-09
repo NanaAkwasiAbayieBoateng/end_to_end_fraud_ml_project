@@ -1,0 +1,6 @@
+transaction_id,items_purchased,transaction_amount,avg_7day_spend,account_age_months,mcc_code,product_category,last_login_time,transaction_datetime
+txn-1001,2,24.50,18,8,Retail_A,Clothing,2023-01-01T10:00:00,2023-01-01T10:30:00
+txn-1002,1,10.00,7,4,Service_C,Other,2023-02-01T08:15:00,2023-02-01T09:05:00
+txn-1003,5,129.99,12,2,High_Risk_E,Luxury_Goods,2023-03-14T01:20:00,2023-03-14T02:05:00
+txn-1004,3,56.75,25,16,Travel_D,Electronics,2023-06-22T18:40:00,2023-06-22T19:10:00
+txn-1005,1,18.25,32,28,Retail_B,Groceries,2023-10-03T11:05:00,2023-10-03T11:22:00

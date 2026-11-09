@@ -109,7 +109,14 @@ The project targets Python 3.12. This walkthrough runs the Python commands in
 Ubuntu on WSL, not in PowerShell. Start WSL first, then change to the project
 directory from the Linux shell. Do not activate a PowerShell virtual
 environment: Windows and Linux virtual environments use different
-interpreters and are not interchangeable.
+interpreters and are not interchangeable. First change the current working directory to
+the project directory in powershell as 
+
+
+```powershell
+cd ./end_to_end_fraud_ml_project
+```
+
 
 From PowerShell, enter Ubuntu:
 
@@ -117,12 +124,22 @@ From PowerShell, enter Ubuntu:
 wsl -d Ubuntu
 ```
 
+This changes the working directory to the linux working directory below:
+
+`/mnt/c/Users/username/Documents/end_to_end_fraud_ml_project`
+
+Alternatively, you can also use 
+
+```powershell
+cd "/mnt/c/Users/username/Documents/Research/end_to_end_fraud_ml_project"
+```
+
 Then, in the Ubuntu shell, change to the project directory on the Windows
 drive, create and activate a Linux virtual environment named
 `end_to_end_fraud_ml_project`, and install the project and test dependencies:
 
 ```bash
-cd "/mnt/c/Users/nboateng/OneDrive - NiCE Ltd/Documents/Research/end_to_end_fraud_ml_project"
+
 mkdir -p ~/.venvs
 python3.12 -m venv ~/.venvs/end_to_end_fraud_ml_project
 source ~/.venvs/end_to_end_fraud_ml_project/bin/activate
