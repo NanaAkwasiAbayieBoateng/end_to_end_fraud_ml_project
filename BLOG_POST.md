@@ -14,6 +14,46 @@ labelled transaction data. Its checked-in ROC-AUC threshold of `0.70` is a
 starter gate, not evidence that the model is safe or effective for a real
 business.
 
+## Project structure
+
+```text
+.
+├── .github/
+│   └── workflows/
+│       └── model-ci-cd.yml
+├── app/
+│   ├── __init__.py
+│   ├── index.html
+│   └── main.py
+├── data/
+│   └── fraud_dataset.csv
+├── mlops/
+│   ├── drift_check.py
+│   ├── export_onnx.py
+│   ├── model_gate.py
+│   └── score_batch.py
+├── models/
+│   ├── __init__.py
+│   ├── baseline_auc.json
+│   └── train.py
+├── tests/
+│   ├── test_api.py
+│   ├── test_batch_scoring.py
+│   └── test_drift.py
+├── .dockerignore
+├── .gitignore
+├── BLOG_POST.md
+├── Dockerfile
+├── README.md
+├── compose.yaml
+├── requirements-ci.txt
+└── requirements-serving.txt
+```
+
+The tree shows the checked-in source and configuration. Training outputs such
+as the deployable model pipeline, metrics, and reference statistics are
+generated under `models/` and are intentionally not checked in.
+
 ## What the system contains
 
 The main journey through the repository is:
@@ -37,6 +77,31 @@ The key files are `README.md` for concise operating instructions,
 serving, `mlops/` for the promotion, batch, drift, and optional ONNX tools,
 `tests/` for focused checks, and `.github/workflows/model-ci-cd.yml` for
 automation.
+
+## Why this project uses these tools
+
+The stack favors common, interoperable tools that solve a concrete need in
+this small fraud-scoring service; there is no single mandatory technology
+stack for production machine learning.
+
+| Tool | Why it is used here | Industry fit and trade-off |
+|---|---|---|
+| Python, pandas, and scikit-learn `Pipeline` | Python provides the model and service ecosystem; pandas handles tabular data, while the pipeline packages feature engineering and prediction into one reusable artifact. | Python and pandas are widely used for data science, and scikit-learn pipelines are a common way to keep preprocessing and inference together. The pipeline also reduces training-serving skew. Custom Python transforms can limit exporting the complete pipeline to another runtime. |
+| XGBoost | A gradient-boosted tree classifier is a practical fit for tabular transaction features and class-probability scoring. | XGBoost is a mature, widely adopted open-source gradient-boosting library, but it is not automatically the best model for most tabular datasets.It has other competitors usch as lightgbm and Catboost. We compare it with a simple baseline and select the best model using appropriate, time-aware validation. |
+| FastAPI, Pydantic, and Uvicorn | FastAPI exposes the prediction endpoint; Pydantic validates the input contract; Uvicorn runs the Asynchronous Server Gateway Interface(ASGI) application. | These are established Python web-service tools. JSON over HTTP is a familiar integration pattern, but FastAPI is one implementation choice rather than a universal model-serving standard. |
+| Docker and Docker Compose | Docker packages the app and its runtime dependencies; Compose makes the local API and its log volume reproducible with one configuration. | Docker images follow the Open Container Initiative (OCI) container ecosystem, a broadly adopted packaging approach. Compose is convenient for local and single-host operation; larger platforms may use Kubernetes or a managed container service instead. |
+| GitHub Actions | The workflow runs tests, validates a candidate, and deploys only after the required checks pass. | CI/CD automation is standard practice, while GitHub Actions is a GitHub-specific, commonly used implementation. A self-hosted runner is appropriate for this single-host example, but it has access to that host and must only run trusted deployment code. |
+| Joblib and ONNX Runtime | Joblib saves and reloads the fitted Python pipeline. The optional ONNX path runs the exported XGBoost classifier and checks its scores against the original classifier. | Joblib is convenient within a compatible Python/scikit-learn environment, but serialized Python objects are version-sensitive and must only be loaded from trusted sources. ONNX is an open model-exchange format with a broad runtime ecosystem; this project's export covers only the classifier, not its custom feature engineering. |
+
+These choices are proportionate to a demonstrator and a modest single-service
+deployment. A feature store, model server, or orchestrator is not included
+because the current example does not show a scale or feature-computation need
+that would justify its operational cost. Consider Feast or another online
+feature store when features need shared, low-latency, point-in-time-consistent
+serving; consider Triton or another dedicated inference server when measured
+throughput, accelerator use, or dynamic batching requirements justify it.
+Choose based on workload evidence and operational requirements, not a tool's
+popularity alone.
 
 ## 1. Prepare the environment
 
@@ -134,6 +199,14 @@ reports PR-AUC as well, but the current promotion gate is ROC-AUC only. Any
 threshold other than the serving default of 0.5 should be selected and
 documented using validation data and business requirements.
 
+Another optional diagnostic is the Kolmogorov-Smirnov (KS) statistic: the
+largest gap between the cumulative fraud and non-fraud score distributions.
+It summarizes how well the scores separate the two classes, but it does not
+choose a decision threshold or replace PR-AUC and cost-based evaluation.
+Calculate it on the same chronological holdout used for other metrics, and
+interpret it alongside the number of positive examples and uncertainty in the
+estimate.
+
 ## 4. Run checks and inspect the API
 
 Run the focused automated test suite:
@@ -228,6 +301,12 @@ network. The default localhost binding is intentional; changing
 
 ## 7. Optional ONNX export
 
+This project’s feature engineering could be included in an ONNX graph, but it currently isn’t:  `mlops/export_onnx.py`  exports only the XGBoost classifier. The API still runs the pandas/scikit-learn preprocessor before passing features to ONNX.
+
+The project’s imputations, category-membership flags, ratios, and date differences could be reimplemented with ONNX operators or custom converters. The main complication is that the current steps use pandas  DataFrame  operations, and ONNX doesn’t natively parse the API’s ISO-8601 date strings. Date conversion to numeric timestamps before inference or implementation of  that parsing outside ONNX.
+
+End-to-end ONNX inference is feasible, but it would require changing the export and serving paths and checking prediction parity. The current split is simpler; including preprocessing in ONNX would make deployment less dependent on Python/sklearn and help keep preprocessing and scoring together
+
 `mlops/export_onnx.py` exports the XGBoost classifier and checks its predicted
 probabilities against the classifier in the scikit-learn pipeline:
 
@@ -306,8 +385,53 @@ limits, explicit operational alerting, and a process for reviewing human
 feedback and confirmed outcomes. Define monitoring ownership and log retention
 before collecting production features.
 
+If serving latency or throughput becomes a concern, measure the full request
+path first—including request validation, feature engineering, model
+inference, and response handling—before choosing an optimization. In this
+project, the optional ONNX export covers the classifier only; the Python
+feature-engineering pipeline still runs separately. Batch scoring can improve
+throughput when the caller can submit multiple records together. For systems
+that require costly rolling or aggregate features, an online feature store
+can avoid recalculating them for every request, but use the same feature
+definitions for offline training and online serving to prevent training-serving
+skew.
+
+For an inference optimization, start with a representative benchmark of
+latency (including tail latency), throughput, and resource use. If profiling
+shows preprocessing is material, evaluate whether the fitted preprocessing
+steps can be exported with a supported ONNX converter; custom transformations
+may need to remain in Python, and parity tests should cover the complete
+prediction path. Polars or PyArrow can be evaluated for a measured,
+dataframe-heavy bottleneck, but replacing pandas adds complexity and is not
+automatically faster for this service's small, single-record requests. Likewise,
+micro-batching can increase throughput under load but adds queuing delay and
+should be introduced only when its latency trade-off is acceptable. Treelite
+or a dedicated server such as Triton are possible options for specific
+tree-inference or serving workloads, not assumed upgrades to the current
+ONNX Runtime/FastAPI design.
+
 The most important end-to-end principle is consistency: preserve chronology
 when evaluating, keep feature engineering with the model, promote only
 validated artifacts, and monitor inputs without confusing drift for labelled
 model performance. With those pieces in place, the repository offers a clear
 path from a local example to a controlled, testable model-serving workflow.
+
+## Deploy locally from PowerShell
+
+From the repository root, first run the model gate, then start the Compose
+service only if validation succeeds:
+
+```powershell
+python mlops/model_gate.py
+if ($LASTEXITCODE -ne 0) { throw "Model validation failed; deployment stopped." }
+docker compose --project-name fraud-model up --build -d
+docker compose --project-name fraud-model ps
+```
+
+The API binds to `http://127.0.0.1:8000` by default; visit
+`http://127.0.0.1:8000/docs` to inspect the API. Docker Desktop (or another
+Docker Engine) must already be running. If Compose reports that it cannot open
+the `dockerDesktopLinuxEngine` pipe on Windows, the Docker engine is not
+available to the CLI; start Docker Desktop and verify `docker version` before
+retrying the Compose command. The model gate can succeed independently, but
+that does not mean the container has started.
