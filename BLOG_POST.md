@@ -325,7 +325,7 @@ copies them to a smaller runtime image, and runs the service as a non-root
 user. Compose maps the API to `127.0.0.1:8000` by default and stores rotating
 prediction logs in a named Docker volume. Check
 `http://127.0.0.1:8000/ready` and open the form or API docs to confirm it is
-serving. To stop the service without removing its persistent log volume, run:
+serving. Check the Swagger at `http://localhost:8000/docs`.To stop the service without removing its persistent log volume, run:
 
 ```bash
 docker compose --project-name fraud-model down
