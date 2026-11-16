@@ -2,6 +2,8 @@
 
 # Local fraud model serving and MLOps
 
+📖 New here? Read [BLOG_POST.md](BLOG_POST.md) — a file-by-file walkthrough of the whole project.
+
 The project serves a gated fraud classifier with FastAPI, packages it in a
 multi-stage Docker image, and deploys it to a dedicated machine using a
 self-hosted GitHub Actions runner. No cloud hosting or registry is required.
