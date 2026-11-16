@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 
 import numpy as np
 
-from mlops.drift_check import psi, psi_from_reference, records_from_file
+from mlops.drift_check import build_issue_payload, psi, psi_from_reference, records_from_file
 
 
 def test_psi_is_zero_for_identical_distributions():
@@ -42,3 +42,17 @@ def test_records_from_file_keeps_only_recent_prediction_events(tmp_path):
 
     assert len(recent) == 1
     assert recent[0]["features"] == {}
+
+
+def test_build_issue_payload_lists_drifted_features():
+    report = {
+        "event": "fraud_drift_check",
+        "prediction_count": 250,
+        "threshold": 0.2,
+        "drifted_features": {"transaction_amount": 0.31},
+    }
+    payload = build_issue_payload(report, 0.2)
+
+    assert "drift" in payload["title"].lower()
+    assert "transaction_amount" in payload["body"]
+    assert "250" in payload["body"]

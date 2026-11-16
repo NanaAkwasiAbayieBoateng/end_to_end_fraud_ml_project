@@ -6,6 +6,22 @@ The project serves a gated fraud classifier with FastAPI, packages it in a
 multi-stage Docker image, and deploys it to a dedicated machine using a
 self-hosted GitHub Actions runner. No cloud hosting or registry is required.
 
+## Architecture
+
+```mermaid
+flowchart LR
+    DATA[(Training data<br/>fraud_dataset.csv)] --> TRAIN[models/train.py<br/>chronological split, XGBoost pipeline]
+    TRAIN --> GATE[mlops/model_gate.py<br/>candidate AUC must beat baseline]
+    GATE -->|passes| REG[(MLflow registry<br/>fraud-scorer, alias: champion)]
+    GATE -->|passes| ART[Model artifact<br/>joblib + ONNX export]
+    ART --> API[FastAPI service<br/>/predict, Docker Compose]
+    API --> LOGS[(Prediction logs<br/>JSONL volume)]
+    LOGS --> DRIFT[mlops/drift_check.py<br/>PSI vs reference stats]
+    DRIFT -->|drift: issue + webhook| ISSUE[GitHub issue]
+    DRIFT -->|drift: repository_dispatch| GATE
+    API --> BATCH[mlops/score_batch.py<br/>batch scoring]
+```
+
 ## Local API
 
 Build and start the API after producing a validated model and its reference
@@ -53,7 +69,10 @@ non-root user.
 `.github/workflows/model-ci-cd.yml` runs tests on pushes and pull requests,
 trains a chronologically split candidate, and requires candidate ROC-AUC to
 strictly exceed `models/baseline_auc.json`. Only a passing candidate artifact
-can be deployed. A push to `main` (for example, a merge) builds the image on
+can be deployed. In CI the gate also logs the run to MLflow and registers the
+winning model as `fraud-scorer`, promoted to the `champion` alias
+(`mlops/model_gate.py --register`); the joblib artifact remains what the API
+serves. A push to `main` (for example, a merge) builds the image on
 the target machine and restarts the Docker Compose service.
 
 To enable deployment:
@@ -63,8 +82,10 @@ To enable deployment:
    controlled reverse proxy.
 2. Install and register a GitHub Actions self-hosted runner on that machine
    with the custom label `fraud-model-server`; run the runner as a service.
-   The workflow's deployment and scheduled monitoring jobs require this label
-   and the runner must be online.
+   The workflow's deployment and drift-check jobs require this label
+   and the runner must be online. The machine is only on intermittently,
+   so the drift check is triggered manually (workflow_dispatch) rather
+   than on a schedule.
 3. Protect `main` and require the test and model-validation checks before
    merging. The runner can control Docker on the host, so only trusted,
    reviewed changes should reach its deployment job.
@@ -80,10 +101,11 @@ the baseline simply to make a candidate pass.
 
 ## Drift monitoring and retraining trigger
 
-The workflow runs a daily PSI check on the local machine against the deployed
+The drift-check job runs a PSI check on the local machine against the deployed
 model's reference feature distributions. It considers prediction logs from
 the last 24 hours, requires at least 100 predictions, and flags feature PSI
-of 0.2 or higher. The check sends an alert to the configured webhook and
+of 0.2 or higher. On drift, the check opens a GitHub issue with the drifted
+features, sends an alert to the configured webhook, and
 dispatches `model-drift-detected`, which starts a fresh test and gated
 candidate-training run.
 
@@ -91,7 +113,7 @@ Configure repository secret `DRIFT_ALERT_WEBHOOK_URL` with an HTTPS endpoint
 that accepts a JSON POST containing `text`, `message`, and `report`. Configure
 `DRIFT_DISPATCH_TOKEN` as a fine-scoped GitHub token with permission to create
 repository dispatches. Without a webhook, the report remains visible in the
-scheduled Actions run; without a dispatch token, drift will not trigger
+Actions run; without a dispatch token, drift will not trigger
 retraining. A drift event never bypasses the AUC gate or merge-to-main
 deployment rule.
 
@@ -120,3 +142,35 @@ python -m mlops.score_batch --input data\transactions.csv --output data\scored_t
 
 By default, the script loads `models/fraud_model_pipeline.joblib` and uses a
 0.5 probability threshold. Override these with `--model` and `--threshold`.
+
+## IEEE-CIS dataset (real-data training)
+
+The checked-in dataset is a small retail-style demo set. To train on the
+industry-standard IEEE-CIS Fraud Detection data instead, download it from
+Kaggle (competition rules mean the CSVs cannot be committed here):
+
+```powershell
+kaggle competitions download -c ieee-fraud-detection -p data\ieee_cis
+# unzip so data\ieee_cis contains train_transaction.csv and train_identity.csv
+python mlops/ieee_cis.py --data-dir data/ieee_cis
+```
+
+`mlops/ieee_cis.py` merges the transaction and identity tables, builds the
+feature matrix (amount/card/count/timing features plus the Vesta V-features
+and categorical encodings), trains XGBoost on a chronological split, reports
+ROC-AUC / PR-AUC, and logs the run to MLflow (experiment
+`fraud-detection-ieee-cis`).
+
+## Measured performance (local)
+
+Measured 2026-11-15 on a small shared VM (1.5 vCPU), model trained by the
+gate on the demo dataset (candidate ROC-AUC 0.840 vs 0.70 baseline):
+
+- `POST /predict` server-side latency over 100 requests: **p50 13.0 ms,
+  p95 17.3 ms** (latency as reported by the API itself).
+- ONNX export verified against the sklearn pipeline (max probability
+  error ~1.5e-07).
+
+The service is deployed locally and intermittently for learning — bring it
+up with `docker compose --project-name fraud-model up -d` on the host
+machine; there is no permanent public hosting.

@@ -88,6 +88,35 @@ def post_json(url: str, payload: dict, token: str | None = None) -> None:
             raise RuntimeError(f"Notification request failed: HTTP {response.status}")
 
 
+def build_issue_payload(report: dict, threshold: float) -> dict:
+    drifted = report.get("drifted_features", {})
+    lines = [
+        f"Drift detected by the scheduled drift check (PSI >= {threshold}).",
+        "",
+        f"Predictions analysed: {report.get('prediction_count')}",
+        "",
+        "Drifted features (PSI):",
+    ]
+    lines += [f"- {feature}: {score}" for feature, score in sorted(drifted.items())]
+    lines += [
+        "",
+        "A retraining candidate is dispatched automatically; the AUC promotion "
+        "gate still applies before any model is promoted.",
+    ]
+    return {
+        "title": f"Fraud model drift detected (PSI >= {threshold})",
+        "body": "\n".join(lines),
+    }
+
+
+def create_github_issue(repository: str, token: str, payload: dict) -> None:
+    post_json(
+        f"https://api.github.com/repos/{repository}/issues",
+        payload,
+        token=token,
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Compute PSI on recent prediction features.")
     parser.add_argument("--reference", type=Path, default=Path("models/reference_stats.json"))
@@ -165,6 +194,13 @@ def main() -> int:
         return 0
 
     message = f"Fraud model drift detected (PSI >= {args.threshold}): {drifted}"
+    if args.github_repository and args.github_token:
+        create_github_issue(
+            args.github_repository,
+            args.github_token,
+            build_issue_payload(report, args.threshold),
+        )
+        print("GitHub drift issue opened.")
     if args.alert_webhook_url:
         post_json(
             args.alert_webhook_url,
