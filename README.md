@@ -1,3 +1,5 @@
+> **Roadmap:** Stage 1–2 project (production API + MLOps) in my [ML / AI Engineer Roadmap](https://github.com/NanaAkwasiAbayieBoateng/ai-ml-engineer-roadmap) — see the [P1+P2 plan](https://github.com/NanaAkwasiAbayieBoateng/ai-ml-engineer-roadmap/blob/main/projects/p1-p2-fraud-scorer.md).
+
 # Local fraud model serving and MLOps
 
 The project serves a gated fraud classifier with FastAPI, packages it in a
