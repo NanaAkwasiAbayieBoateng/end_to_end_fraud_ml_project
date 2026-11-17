@@ -17,6 +17,7 @@ models/*
 !models/baseline_auc.json
 !models/train.py
 !README.md
+!conftest.py
 !requirements-ci.txt
 !requirements-serving.txt
 !BLOG_POST.md

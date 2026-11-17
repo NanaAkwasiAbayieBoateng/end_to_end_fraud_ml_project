@@ -5,8 +5,7 @@ on:
     branches: ["**"]
   pull_request:
     branches: [main]
-  schedule:
-    - cron: "17 3 * * *"
+  workflow_dispatch:
   repository_dispatch:
     types: [model-drift-detected]
 
@@ -41,7 +40,7 @@ jobs:
       - run: python -m pip install -r requirements-ci.txt
       - name: Train candidate and enforce baseline ROC-AUC
         run: >-
-          python mlops/model_gate.py
+          python mlops/model_gate.py --register
           --data data/fraud_dataset.csv
           --baseline models/baseline_auc.json
           --model-output models/fraud_model_pipeline.joblib
@@ -78,7 +77,7 @@ jobs:
           docker compose --project-name fraud-model up --detach --wait --force-recreate --remove-orphans
 
   drift-check:
-    if: github.event_name == 'schedule'
+    if: github.event_name == 'workflow_dispatch'
     runs-on: [self-hosted, fraud-model-server]
     steps:
       - uses: actions/checkout@v4

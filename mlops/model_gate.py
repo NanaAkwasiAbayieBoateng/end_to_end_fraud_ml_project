@@ -54,6 +54,10 @@ def main() -> int:
     parser.add_argument("--model-output", type=Path, default=ROOT / "models" / "fraud_model_pipeline.joblib")
     parser.add_argument("--metrics-output", type=Path, default=ROOT / "models" / "model_metrics.json")
     parser.add_argument("--reference-output", type=Path, default=ROOT / "models" / "reference_stats.json")
+    parser.add_argument("--register", action="store_true",
+                        help="Log the training run to MLflow and, if the gate passes, "
+                             "register the model and promote it to the 'champion' alias.")
+    parser.add_argument("--registered-model-name", default="fraud-scorer")
     args = parser.parse_args()
 
     if not args.data.is_file() or not args.baseline.is_file():
@@ -66,7 +70,7 @@ def main() -> int:
     results = train_fraud_model(
         dataset,
         save_artifacts=False,
-        log_mlflow_run=False,
+        log_mlflow_run=args.register,
     )
     candidate_auc = float(results["metrics"]["roc_auc"])
     if not np.isfinite(candidate_auc):
@@ -93,6 +97,37 @@ def main() -> int:
         json.dumps(reference_summary(dataset), indent=2, default=str) + "\n",
         encoding="utf-8",
     )
+    if args.register:
+        run_id = results.get("mlflow_run_id")
+        if not run_id:
+            print("MLflow registration requested but training produced no run ID.", file=sys.stderr)
+            return 1
+        import mlflow
+        from mlflow.tracking import MlflowClient
+
+        version = mlflow.register_model(
+            f"runs:/{run_id}/fraud-model", args.registered_model_name
+        )
+        client = MlflowClient()
+        client.set_registered_model_alias(
+            args.registered_model_name, "champion", version.version
+        )
+        client.set_model_version_tag(
+            args.registered_model_name, version.version, "baseline_roc_auc", str(baseline)
+        )
+        client.set_model_version_tag(
+            args.registered_model_name, version.version, "candidate_roc_auc", str(candidate_auc)
+        )
+        metrics["mlflow_run_id"] = run_id
+        metrics["registered_model"] = args.registered_model_name
+        metrics["registered_version"] = str(version.version)
+        metrics["registered_alias"] = "champion"
+        args.metrics_output.write_text(json.dumps(metrics, indent=2) + "\n", encoding="utf-8")
+        print(
+            f"Registered {args.registered_model_name} version {version.version} "
+            "and promoted it to alias 'champion'."
+        )
+
     print(
         f"Model validation passed: candidate ROC-AUC {candidate_auc:.6f} "
         f"> baseline {baseline:.6f}."
