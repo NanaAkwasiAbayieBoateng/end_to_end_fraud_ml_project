@@ -4,6 +4,7 @@ pydantic==2.14.1
 pandas==3.0.6
 numpy==2.5.4
 scikit-learn==1.9.1
+skops==0.16.0
 xgboost==3.4.1
 joblib==1.6.0
 onnxruntime==1.31.0
