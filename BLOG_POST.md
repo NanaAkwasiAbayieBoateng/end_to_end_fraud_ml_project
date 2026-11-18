@@ -19,6 +19,85 @@ gated promotion, and observable behaviour after deployment.
 If you only read one other file, read `README.md` for how to run everything.
 This post explains what every file does and why it exists.
 
+## Project structure
+
+The tracked repository is organized around the path from training data to
+serving and monitoring:
+
+```text
+.
+├── .github/workflows/model-ci-cd.yml
+├── app/                  # FastAPI service and demo form
+├── data/                 # Demo training data and example scoring input
+├── mlops/                # Promotion gate, batch scoring, drift, ONNX, IEEE-CIS
+├── models/               # Training code and checked-in baseline
+├── tests/                # API, batch, drift, and IEEE-CIS tests
+├── BLOG_POST.md
+├── Dockerfile
+├── README.md
+├── compose.yaml
+├── requirements-ci.txt
+└── requirements-serving.txt
+```
+
+The trained pipeline, metrics, and feature-reference statistics are generated
+under `models/` and are intentionally not tracked. The IEEE-CIS CSVs are also
+downloaded separately and are not committed.
+
+## Set up the Python environment
+
+The project targets Python 3.12. In Windows PowerShell, run these commands
+from the repository root to create and activate a project-local virtual
+environment and install the development and test dependencies:
+
+```powershell
+py -3.12 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -r requirements-ci.txt
+```
+
+The prompt should show `(.venv)` after activation. In a new terminal, activate
+the environment again before running project commands. `requirements-ci.txt`
+includes the serving requirements plus pytest, ONNX conversion, and MLflow;
+Docker installs the smaller `requirements-serving.txt` set. From a WSL shell
+at the repository root, use a separate Linux virtual environment—Windows and
+Linux environments cannot be shared:
+
+```bash
+python3.12 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements-ci.txt
+```
+
+Do not commit the `.venv` directory.
+
+## Dataset and prediction contract
+
+The demo CSV and the online API share eight input features and a binary
+`target` label:
+
+| Feature | Meaning |
+|---|---|
+| `items_purchased` | Number of items in the transaction |
+| `transaction_amount` | Transaction value |
+| `avg_7day_spend` | Recent average spend |
+| `account_age_months` | Account age |
+| `mcc_code` | Merchant category code |
+| `product_category` | Product category |
+| `last_login_time` | Most recent login time |
+| `transaction_datetime` | Transaction time |
+| `target` | Label: 1 for fraud, 0 otherwise |
+
+Dates supplied to the API use ISO-8601 strings. Numeric and categorical
+inputs may be null or omitted because the feature pipeline handles missing
+values; unknown fields and non-finite numbers are rejected. Before using a
+real dataset, validate its schema, label completeness and provenance, time
+availability, and potential leakage. In particular, inputs must be available
+at decision time, and related transactions or customers may require
+group-aware evaluation in addition to chronological splitting.
+
 ## The tools, and why each one
 
 Every tool here solves a specific problem in the pipeline. Nothing is
@@ -32,8 +111,9 @@ included "because it's popular."
   inputs, which removes the classic training/serving skew bug where the API
   re-implements preprocessing slightly differently from training.
 - **XGBoost (`XGBClassifier`)** — gradient-boosted trees are a strong,
-  boring, well-understood choice for tabular fraud features, and they output
-  calibrated-enough probabilities for a threshold decision. Alternatives
+  well-understood choice for tabular fraud features, and it outputs scores
+  used for threshold decisions. Those scores are not automatically calibrated;
+  calibration and threshold choice need separate evaluation. Alternatives
   (LightGBM, CatBoost) would also work; XGBoost is what's wired in.
 - **FastAPI + Pydantic + Uvicorn** — FastAPI gives a small HTTP API with
   automatic OpenAPI docs at `/docs`; Pydantic models define and enforce the
@@ -429,11 +509,21 @@ the running service. Drift can start the process; it cannot shortcut it.
 
 ## How to run it, what it scores, and what's left
 
-**Running it** is the README's job — follow the sections there: install
-`requirements-ci.txt`, run `python mlops/model_gate.py`, then
-`docker compose --project-name fraud-model up --build -d`, and open
-`http://127.0.0.1:8000` (form) or `/docs` (Swagger). Tests are
-`pytest -q tests`.
+**Running it** starts in the activated environment above. From the repository
+root, run the focused tests, train and validate a model, then start the API
+with Docker Compose:
+
+```powershell
+python -m pytest -q tests
+python mlops/model_gate.py
+docker compose --project-name fraud-model up --build -d
+```
+
+The API is at `http://127.0.0.1:8000` (form) and
+`http://127.0.0.1:8000/docs` (Swagger). The README has the batch-scoring,
+drift-check, and deployment commands. For Python-only local serving instead
+of Docker, run `python -m uvicorn app.main:app --reload` after the model gate
+has produced the model artifact.
 
 **Measured numbers** (from the README, measured 2026-11-15 on a small shared
 VM, model trained by the gate on the demo data):
@@ -458,7 +548,9 @@ python mlops/ieee_cis.py --data-dir data/ieee_cis
 After that, the honest upgrades are the unglamorous ones: replace the 0.70
 starter baseline with the champion's measured score on the same data and
 split, choose a decision threshold from the actual costs of missed fraud
-versus false alarms instead of the default 0.5, and keep remembering the
-principle the whole repo is built around — preserve chronology, keep feature
-engineering inside the artifact, promote only what passes the gate, and
-never mistake input drift for measured model performance.
+versus false alarms instead of assuming 0.5 is right, and assess PR-AUC,
+calibration, and performance across relevant time periods and transaction
+segments. Keep remembering the principle the whole repo is built around:
+preserve chronology, keep feature engineering inside the artifact, promote
+only what passes the gate, and never mistake input drift for measured model
+performance.
