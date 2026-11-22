@@ -4,3 +4,4 @@ httpx
 httpx2
 onnxmltools
 mlflow
+sklearn2pmml==0.134.0

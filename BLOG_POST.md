@@ -153,8 +153,8 @@ included "because it's popular."
   trains and gates a candidate, exports ONNX, and deploys. Automation is
   what makes the gate real: a model that fails tests or the AUC check
   cannot reach deployment.
-- **A self-hosted GitHub Actions runner** — deployment targets Nana's own
-  machine (label `fraud-model-server`), because the service is hosted
+- **A self-hosted GitHub Actions runner** — deployment targets a dedicated virtual 
+  machine similar to a local machine (label `fraud-model-server`), because the service is hosted
   locally and intermittently. The trade-off is explicit: that runner can
   control Docker on its host, so only reviewed, trusted code should ever
   reach the deploy job.
@@ -168,7 +168,7 @@ included "because it's popular."
   any drift library) dependency. `mlops/drift_check.py` implements the
   Population Stability Index by hand with numpy: bin the live features the
   same way as the training reference, compare proportions, flag anything at
-  PSI ≥ 0.2. The approach is the standard one Evidently popularised; here
+  PSI ≥ 0.25. The approach is the standard one Evidently popularised; here
   it's ~30 lines, which is all a single-service monitor justifies.
 
 ## How it was built, step by step
@@ -183,8 +183,7 @@ previous one produced something it needs.
    pipeline built here.
 2. **The API** (`app/main.py`, `app/index.html`). Load the saved pipeline,
    validate requests against a strict schema, return a probability and a
-   decision, and log every prediction as JSON. The log is not decoration —
-   stage 6 eats it.
+   decision, and log every prediction as JSON. The prediction log is a core system artifact, enabling auditability, performance tracking, and future analysis.
 3. **The promotion gate** (`mlops/model_gate.py`). Wrap training in a check:
    candidate ROC-AUC must *strictly* beat `models/baseline_auc.json`, or
    nothing deployable is written. On success it also writes the feature
