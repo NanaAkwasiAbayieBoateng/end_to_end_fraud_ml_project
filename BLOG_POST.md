@@ -1,23 +1,36 @@
 # From transaction data to a running fraud model: a file-by-file walkthrough
 
-This project is a complete, small fraud-scoring system. It trains an XGBoost
-classifier on transaction data, refuses to promote the new model unless it
-beats the current baseline, serves the winner through a FastAPI service,
-watches the live traffic for drift, and can kick off retraining when the
-inputs change. Everything runs locally — the service is brought up on one
-machine, from time to time, for learning. There is no cloud hosting.
+This project demonstrates a complete, small fraud-scoring system: it trains
+an XGBoost classifier, requires a candidate to beat a baseline before
+promotion, serves the winner through FastAPI, and monitors prediction inputs
+for drift. It also packages and deploys the system with Docker and GitHub
+Actions. Everything runs locally; it does not require cloud hosting.
 
-Two honesty notes before anything else. The checked-in dataset
-(`data/fraud_dataset.csv`) is a small demo set: 10,000 rows, 3% fraud. It is
-not representative production data. And the promotion threshold
-(`models/baseline_auc.json`, ROC-AUC 0.70) is a starter gate, not proof that
-a model is safe to make real decisions with. The point of the repo is the
-engineering path around the model — the same path a real system needs:
-time-aware evaluation, one shared feature pipeline for training and serving,
-gated promotion, and observable behaviour after deployment.
+This is an engineering example, not a production-ready fraud decision
+system. The checked-in dataset has 10,000 rows and a 3% fraud rate; it is
+not representative production data. The 0.70 ROC-AUC threshold in
+`models/baseline_auc.json` is a starter gate, not evidence that a model is
+safe or effective for real decisions.
 
-If you only read one other file, read `README.md` for how to run everything.
-This post explains what every file does and why it exists.
+Read `README.md` for commands and operating instructions. This post explains
+the architecture and how every file contributes to it.
+
+Clone the repository from GitHub:
+
+```bash
+git clone https://github.com/NanaAkwasiAbayieBoateng/end_to_end_fraud_ml_project.git
+```
+
+## Contents
+
+- [Project structure](#project-structure)
+- [Set up the Python environment](#set-up-the-python-environment)
+- [Dataset and prediction contract](#dataset-and-prediction-contract)
+- [Tools and responsibilities](#the-tools-and-why-each-one)
+- [Build stages](#how-it-was-built-step-by-step)
+- [File reference](#every-file-explained)
+- [A prediction and drift-check journey](#a-requests-journey)
+- [Running locally and current results](#how-to-run-it-what-it-scores-and-whats-left)
 
 ## Project structure
 
@@ -46,32 +59,44 @@ downloaded separately and are not committed.
 
 ## Set up the Python environment
 
-The project targets Python 3.12. In Windows PowerShell, run these commands
-from the repository root to create and activate a project-local virtual
-environment and install the development and test dependencies:
+The project targets Python 3.12. The commands below use Ubuntu on WSL. Do not
+reuse a Windows virtual environment from inside WSL: Windows and Linux
+interpreters use separate environments.
+
+In PowerShell, enter WSL and open the cloned repository directory:
 
 ```powershell
-py -3.12 -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-python -m pip install -r requirements-ci.txt
+wsl -d Ubuntu
+cd "/mnt/c/Users/<username>/Documents/Research/end_to_end_fraud_ml_project"
 ```
 
-The prompt should show `(.venv)` after activation. In a new terminal, activate
-the environment again before running project commands. `requirements-ci.txt`
-includes the serving requirements plus pytest, ONNX conversion, and MLflow;
-Docker installs the smaller `requirements-serving.txt` set. From a WSL shell
-at the repository root, use a separate Linux virtual environment—Windows and
-Linux environments cannot be shared:
+Then create an isolated Linux environment and install the development
+dependencies:
 
 ```bash
-python3.12 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
+mkdir -p ~/.venvs
+python3.12 -m venv ~/.venvs/end_to_end_fraud_ml_project
+source ~/.venvs/end_to_end_fraud_ml_project/bin/activate
 python -m pip install -r requirements-ci.txt
+which python
+which pip
 ```
 
-Do not commit the `.venv` directory.
+The `which` commands should point into
+`~/.venvs/end_to_end_fraud_ml_project`. Run all remaining project commands in
+this activated WSL environment.
+
+`requirements-ci.txt` includes the serving dependencies plus test and ONNX
+packages. The container uses the smaller `requirements-serving.txt` set. Docker
+Engine and the Docker Compose plugin are needed only for the container steps;
+Python-only tests and training do not require Docker.
+
+For a new WSL environment, keeping the virtual environment under
+`~/.venvs/` avoids slower package operations on a Windows-mounted OneDrive
+directory. Use `python -m pytest` rather than calling the bare `pytest`
+console script so the repository root is added to Python's import path.
+
+
 
 ## Dataset and prediction contract
 
@@ -123,12 +148,15 @@ included "because it's popular."
   joblib (`models/fraud_model_pipeline.joblib`). Simple and exact, but a
   pickle-format caveat applies: only ever load artifacts you produced
   yourself, and expect version sensitivity between scikit-learn releases.
-- **MLflow (tracking + Model Registry)** — `models/train.py` logs every
+- **MLflow (local tracking + Model Registry)** — `models/train.py` logs every
   training run (parameters, ROC-AUC/PR-AUC, tags, the model itself) to a
   local SQLite store (`mlflow.db`). With `--register`, the gate also
   registers a winning model in the MLflow Model Registry under the name
   `fraud-scorer` and promotes it to the `champion` alias, so "which model is
   current, and what did it score?" is a query, not an archaeology project.
+  This setup demonstrates registry concepts locally; a real deployment would
+  add shared tracking infrastructure, durable artifact storage,
+  authentication, and access controls.
 - **skops, with cloudpickle as fallback** — when MLflow saves the sklearn
   model, `train.py` prefers the **skops** format, which only loads trusted
   types (the list is `SKOPS_TRUSTED_TYPES` in `train.py`) and is safer than
@@ -164,12 +192,12 @@ included "because it's popular."
   `requirements-ci.txt` contains both `httpx` and `httpx2`: newer Starlette
   versions moved to the renamed `httpx2` package, and keeping both means
   the test client works either way.
-- **PSI drift detection, implemented directly** — there is no Evidently (or
-  any drift library) dependency. `mlops/drift_check.py` implements the
-  Population Stability Index by hand with numpy: bin the live features the
-  same way as the training reference, compare proportions, flag anything at
-  PSI ≥ 0.25. The approach is the standard one Evidently popularised; here
-  it's ~30 lines, which is all a single-service monitor justifies.
+- **PSI drift detection, implemented directly** — there is no Evidently or
+  other drift-library dependency. `mlops/drift_check.py` implements the
+  Population Stability Index by hand with NumPy: bin live features in the
+  same way as the training reference, compare proportions, and flag any
+  feature at PSI ≥ 0.2. This is a small, understandable monitor for a
+  single-service example.
 
 ## How it was built, step by step
 
@@ -207,7 +235,7 @@ previous one produced something it needs.
    and candidate AUCs tagged on the version. The joblib file is still what
    the API serves; the registry is the record of what's current and why.
 9. **Real data** (`mlops/ieee_cis.py`). A separate pipeline for the
-   IEEE-CIS Fraud Detection dataset — the industry-standard benchmark —
+   public IEEE-CIS Fraud Detection benchmark —
    with the same discipline (chronological split, MLflow logging) on much
    wider, messier data. Only the Kaggle download is missing (see the end).
 
@@ -221,13 +249,14 @@ Read the repo in this order and it will make sense top to bottom.
   commands, CI/CD and drift configuration, measured performance. Start
   there to *do* things; this post is for understanding them.
 - **`BLOG_POST.md`** — this file.
-- **`conftest.py`** — the smallest file with the best story. It contains
-  only a docstring — no code. Its mere presence at the repo root makes
-  pytest add the root to `sys.path`, so `app`, `mlops`, and `models`
-  import as top-level packages. It exists because CI runs the bare `pytest`
-  console script, which (unlike `python -m pytest`) does not put the
-  working directory on `sys.path`; the test job failed at collection with
-  `ModuleNotFoundError: No module named 'app'` until this file landed.
+- **`conftest.py`** — explains why this file exists. It contains only a
+  docstring — no test code. Its presence at the repository root makes
+  pytest add the root to `sys.path`, so `app`, `mlops`, and `models` import
+  as top-level packages. It was added because CI runs the bare `pytest`
+  console script, which (unlike `python -m pytest`) does not consistently
+  put the working directory on `sys.path`; the test job previously failed at
+  collection with `ModuleNotFoundError: No module named 'app'` until this
+  file landed.
 - **`requirements-serving.txt`** — the pinned runtime dependencies (FastAPI,
   Uvicorn, Pydantic, pandas, numpy, scikit-learn, XGBoost, joblib,
   onnxruntime). This is all the Docker image installs.
@@ -383,8 +412,8 @@ because of the root `conftest.py`.
   `create_github_issue(...)`, via `post_json(...)`), POSTs the report to
   `DRIFT_ALERT_WEBHOOK_URL` if configured, and sends a
   `model-drift-detected` repository dispatch that re-runs CI training.
-  Gotcha: the issue text still says "scheduled drift check" — a leftover
-  from when the workflow ran on a schedule; it's manual now (below).
+  The workflow is currently triggered manually or through repository
+  dispatch, not on a schedule.
   Repository and token must be configured together or the script refuses to
   start.
 - **`mlops/export_onnx.py`** — loads the gated pipeline, converts only the
@@ -412,7 +441,9 @@ because of the root `conftest.py`.
 ### `tests/` — what is actually verified
 
 16 tests, all using fakes instead of the real model, so the suite runs in
-about a minute and proves wiring, not model quality.
+seconds and proves wiring, not model quality. With Python 3.12 and
+`requirements-ci.txt` installed, the verified local run passed all 16 tests
+in 3.94 seconds.
 
 - **`tests/test_api.py`** (5 tests) — a `FakeModel` returning a fixed
   0.75 probability verifies: a valid request returns probability, decision,
@@ -504,7 +535,24 @@ scores, POSTs the report to the alert webhook, and fires a
 `model-drift-detected` dispatch. That dispatch re-enters this same workflow
 at the top — tests, then gated training — and the new candidate still has
 to beat the baseline and land on `main` before `deploy-local` will touch
-the running service. Drift can start the process; it cannot shortcut it.
+the running service.
+
+The full flow is:
+
+```text
+Prediction inputs
+  -> PSI check
+  -> drift issue + webhook
+  -> repository dispatch
+  -> tests
+  -> gated candidate training
+  -> pass baseline gate
+  -> merge to main
+  -> local deployment
+```
+
+Drift can start the retraining process, but it cannot replace or shortcut
+the promotion gate.
 
 ## How to run it, what it scores, and what's left
 
@@ -517,6 +565,18 @@ python -m pytest -q tests
 python mlops/model_gate.py
 docker compose --project-name fraud-model up --build -d
 ```
+
+The local verification was run with Python 3.12 in WSL:
+
+- `python -m pytest -q tests`: **16 passed**
+- `python mlops/model_gate.py`: candidate passed at ROC-AUC **0.839915**
+- `python mlops/export_onnx.py --model models/fraud_model_pipeline.joblib`:
+  export passed with maximum probability error **1.4901161e-07**
+
+No application-code changes were needed for the passing verification run.
+The key requirement is to install the CI dependencies in a Python 3.12
+virtual environment; using Python 3.14 or a virtual environment created on
+the Windows side can produce a different, unsupported setup.
 
 The API is at `http://127.0.0.1:8000` (form) and
 `http://127.0.0.1:8000/docs` (Swagger). The README has the batch-scoring,
@@ -535,21 +595,18 @@ VM, model trained by the gate on the demo data):
 - ONNX parity: max probability error ~1.5e-07 versus the sklearn pipeline.
 
 **What remains** is the real-data step. `mlops/ieee_cis.py` is written and
-tested, but the IEEE-CIS CSVs can't be committed (Kaggle competition rules),
-so the one manual step left is yours:
+tested. The highest-priority upgrades are:
 
-```bash
-kaggle competitions download -c ieee-fraud-detection -p data/ieee_cis
-# unzip so data/ieee_cis contains train_transaction.csv and train_identity.csv
-python mlops/ieee_cis.py --data-dir data/ieee_cis
-```
+1. Replace the 0.70 starter baseline with the champion's measured holdout
+   score from the same dataset version and chronological split.
+2. Choose a decision threshold from the costs of missed fraud versus false
+   alarms instead of assuming 0.5 is correct.
+3. Add calibration, PR-AUC, and performance checks across relevant time
+   periods and transaction segments.
+4. Improve validation with customer- and account-aware splits where related
+   transactions could otherwise leak across the training and holdout sets.
 
-After that, the honest upgrades are the unglamorous ones: replace the 0.70
-starter baseline with the champion's measured score on the same data and
-split, choose a decision threshold from the actual costs of missed fraud
-versus false alarms instead of assuming 0.5 is right, and assess PR-AUC,
-calibration, and performance across relevant time periods and transaction
-segments. Keep remembering the principle the whole repo is built around:
-preserve chronology, keep feature engineering inside the artifact, promote
-only what passes the gate, and never mistake input drift for measured model
-performance.
+Keep the principle the whole repository is built around: preserve chronology,
+keep feature engineering inside the artifact, promote only what passes the
+gate, and never mistake input drift for measured model performance.
+
