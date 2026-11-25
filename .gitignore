@@ -23,6 +23,8 @@ models/*
 !BLOG_POST.md
 !mlops/
 !mlops/**
+!experiments/
+!experiments/**
 !tests/
 !tests/**
 !Dockerfile
